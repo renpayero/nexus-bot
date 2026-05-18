@@ -9,6 +9,9 @@ import { sleep, jitter, formatARDate, escapeHtml } from './utils.js';
 const RETRY_DELAYS_MS = [30_000, 120_000, 300_000];
 const MAX_SESSION_REFRESHES = 2;
 const POST_CLICK_SETTLE_MS = 3_000;
+const TRANSITION_TIMEOUT_MS = 15_000;
+const MODAL_OPEN_TIMEOUT_MS = 15_000;
+const MODAL_SUBMIT_ENABLE_TIMEOUT_MS = 5_000;
 
 const SELECTORS = {
   startBtn: {
@@ -39,6 +42,26 @@ const SELECTORS = {
       'text=/jornada finalizada/i',
     ],
   },
+  modal: {
+    container: {
+      roles: [
+        (page) => page.getByRole('dialog'),
+      ],
+      css: [
+        '[role="dialog"]',
+        'text=/reporte del d[ií]a/i',
+      ],
+    },
+    submitBtn: {
+      roles: [
+        (page) => page.getByRole('button', { name: /enviar.*finalizar.*jornada/i }),
+      ],
+      css: [
+        'button:has-text("Enviar y Finalizar Jornada")',
+        'button:has-text("Enviar y finalizar jornada")',
+      ],
+    },
+  },
 };
 
 const firstVisible = async (page, group) => {
@@ -59,6 +82,16 @@ const firstVisible = async (page, group) => {
     }
   }
   return null;
+};
+
+const waitForVisible = async (page, group, timeoutMs, label) => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const found = await firstVisible(page, group);
+    if (found) return found;
+    await sleep(500);
+  }
+  throw new Error(`${label}: no visible tras ${timeoutMs}ms`);
 };
 
 const takeScreenshot = async (page, action, reason) => {
@@ -87,22 +120,22 @@ export const detectState = async (page) => {
 
   await sleep(1_500);
 
-  const finished = await firstVisible(page, SELECTORS.finishedText);
-  if (finished) {
-    logger.debug({ via: finished.kind, selector: finished.selector }, 'Detectado: finished');
-    return 'finished';
-  }
-
   const endBtn = await firstVisible(page, SELECTORS.endBtn);
   if (endBtn) {
-    logger.debug({ via: endBtn.kind, selector: endBtn.selector }, 'Detectado: in_progress');
+    logger.debug({ via: endBtn.kind, selector: endBtn.selector }, 'Detectado: in_progress (endBtn visible)');
     return 'in_progress';
   }
 
   const startBtn = await firstVisible(page, SELECTORS.startBtn);
   if (startBtn) {
-    logger.debug({ via: startBtn.kind, selector: startBtn.selector }, 'Detectado: not_started');
+    logger.debug({ via: startBtn.kind, selector: startBtn.selector }, 'Detectado: not_started (startBtn visible)');
     return 'not_started';
+  }
+
+  const finished = await firstVisible(page, SELECTORS.finishedText);
+  if (finished) {
+    logger.debug({ via: finished.kind, selector: finished.selector }, 'Detectado: finished (sin botones, solo texto)');
+    return 'finished';
   }
 
   try {
@@ -119,10 +152,83 @@ export const detectState = async (page) => {
   return 'unknown';
 };
 
+const isAlreadyDone = (action, state) => {
+  if (action === 'start') return state === 'in_progress';
+  if (action === 'end') return state === 'not_started' || state === 'finished';
+  return false;
+};
+
+const isReadyForAction = (action, state) => {
+  if (action === 'start') return state === 'not_started' || state === 'finished';
+  if (action === 'end') return state === 'in_progress';
+  return false;
+};
+
 const isRetryableError = (msg) =>
   /timeout|net::|ERR_|navigation|networkidle|target closed|browser has been closed/i.test(msg);
 
-export const attemptAction = async ({ action, fromState, toState, label, force = false }) => {
+const performStartFlow = async (page) => {
+  const btn = await firstVisible(page, SELECTORS.startBtn);
+  if (!btn) throw new Error('START_BTN_NOT_FOUND: botón "Iniciar Jornada" no visible antes del click');
+  logger.info({ kind: btn.kind, selector: btn.selector }, 'Clickeando Iniciar Jornada');
+  await btn.locator.click();
+
+  await waitForVisible(page, SELECTORS.endBtn, TRANSITION_TIMEOUT_MS, 'START_TRANSITION_TIMEOUT: botón "Finalizar Jornada"');
+  logger.info('Transición a in_progress confirmada');
+};
+
+const performEndFlow = async (page) => {
+  const btn = await firstVisible(page, SELECTORS.endBtn);
+  if (!btn) throw new Error('END_BTN_NOT_FOUND: botón "Finalizar Jornada" no visible antes del click');
+  logger.info({ kind: btn.kind, selector: btn.selector }, 'Clickeando Finalizar Jornada');
+  await btn.locator.click();
+
+  const modal = await waitForVisible(
+    page,
+    SELECTORS.modal.container,
+    MODAL_OPEN_TIMEOUT_MS,
+    'MODAL_NOT_OPENED: modal "Reporte del día"',
+  );
+  logger.info({ kind: modal.kind, selector: modal.selector }, 'Modal abierto');
+
+  const textareaLoc = page.locator('textarea').first();
+  try {
+    await textareaLoc.waitFor({ state: 'visible', timeout: 5_000 });
+  } catch {
+    throw new Error('MODAL_TEXTAREA_NOT_FOUND: textarea del modal no visible');
+  }
+
+  const reportText = (config.endReportText && config.endReportText.trim()) || 'Tareas completadas exitosamente.';
+  logger.info({ length: reportText.length }, 'Llenando textarea con reporte del día');
+  await textareaLoc.fill(reportText);
+
+  const submitBtn = await firstVisible(page, SELECTORS.modal.submitBtn);
+  if (!submitBtn) throw new Error('MODAL_SUBMIT_NOT_FOUND: botón "Enviar y Finalizar Jornada" no visible');
+
+  const enableDeadline = Date.now() + MODAL_SUBMIT_ENABLE_TIMEOUT_MS;
+  let enabled = false;
+  while (Date.now() < enableDeadline) {
+    enabled = await submitBtn.locator.isEnabled().catch(() => false);
+    if (enabled) break;
+    await sleep(300);
+  }
+  if (!enabled) {
+    throw new Error(`MODAL_SUBMIT_DISABLED: el botón "Enviar y Finalizar Jornada" sigue deshabilitado tras ${MODAL_SUBMIT_ENABLE_TIMEOUT_MS}ms. ¿La textarea no aceptó el texto?`);
+  }
+
+  logger.info({ kind: submitBtn.kind, selector: submitBtn.selector }, 'Clickeando Enviar y Finalizar Jornada');
+  await submitBtn.locator.click();
+
+  await waitForVisible(
+    page,
+    SELECTORS.startBtn,
+    TRANSITION_TIMEOUT_MS,
+    'END_TRANSITION_TIMEOUT: botón "Iniciar Jornada" no apareció tras enviar el reporte',
+  );
+  logger.info('Transición a not_started confirmada (modal cerrado + Iniciar Jornada visible)');
+};
+
+export const attemptAction = async ({ action, label, force = false }) => {
   const startedAt = Date.now();
   let sessionRefreshes = 0;
 
@@ -133,14 +239,14 @@ export const attemptAction = async ({ action, fromState, toState, label, force =
       const state = await detectState(page);
       logger.info({ action, attempt, state }, 'Estado detectado');
 
-      if (state === toState && !force) {
-        const msg = `✅ <b>${escapeHtml(label)}</b>: ya estaba completada (idempotente)\n🕒 ${escapeHtml(formatARDate())}`;
-        logger.info({ action }, 'Idempotente: ya estaba en estado destino');
+      if (isAlreadyDone(action, state) && !force) {
+        const msg = `✅ <b>${escapeHtml(label)}</b>: ya estaba completada (idempotente, estado <code>${escapeHtml(state)}</code>)\n🕒 ${escapeHtml(formatARDate())}`;
+        logger.info({ action, state }, 'Idempotente');
         await notify(msg);
-        return { ok: true, idempotent: true };
+        return { ok: true, idempotent: true, state };
       }
 
-      if (state !== fromState && !force) {
+      if (!isReadyForAction(action, state) && !force) {
         const shot = await takeScreenshot(page, action, 'unexpected_state');
         await notifyError(
           `⚠️ <b>${escapeHtml(label)}</b>: estado inesperado <code>${escapeHtml(state)}</code>. No ejecuto acción.\n🕒 ${escapeHtml(formatARDate())}`,
@@ -156,28 +262,42 @@ export const attemptAction = async ({ action, fromState, toState, label, force =
       }
 
       if (config.dryRun) {
-        logger.info({ action, url: page.url() }, '[DRY_RUN] habría clickeado');
-        await notify(`<b>${escapeHtml(label)}</b>: habría clickeado, no se hizo nada\n🕒 ${escapeHtml(formatARDate())}`);
+        if (action === 'start') {
+          logger.info({ action, url: page.url() }, '[DRY_RUN] habría clickeado Iniciar Jornada');
+          await notify(
+            `<b>${escapeHtml(label)}</b>: habría clickeado <code>Iniciar Jornada</code> y esperado la transición a in_progress. No se hizo nada.\n🕒 ${escapeHtml(formatARDate())}`,
+          );
+        } else {
+          const reportText = (config.endReportText && config.endReportText.trim()) || 'Tareas completadas exitosamente.';
+          logger.info(
+            { action, url: page.url(), reportText },
+            '[DRY_RUN] habría clickeado Finalizar Jornada, llenado modal y enviado',
+          );
+          await notify(
+            `<b>${escapeHtml(label)}</b>: habría:\n1️⃣ clickeado <code>Finalizar Jornada</code>\n2️⃣ esperado el modal "Reporte del día"\n3️⃣ llenado textarea con <i>"${escapeHtml(reportText)}"</i>\n4️⃣ clickeado <code>Enviar y Finalizar Jornada</code>\n5️⃣ esperado vuelta a <code>not_started</code>\nNo se hizo nada.\n🕒 ${escapeHtml(formatARDate())}`,
+          );
+        }
         return { ok: true, dryRun: true };
       }
 
-      const group = action === 'start' ? SELECTORS.startBtn : SELECTORS.endBtn;
-      const btn = await firstVisible(page, group);
-      if (!btn) throw new Error(`Botón ${action} no visible justo antes de clickear`);
-      logger.info({ action, kind: btn.kind, selector: btn.selector }, 'Clickeando');
-      await btn.locator.click();
-      await sleep(POST_CLICK_SETTLE_MS);
+      if (action === 'start') {
+        await performStartFlow(page);
+      } else {
+        await performEndFlow(page);
+      }
 
+      await sleep(POST_CLICK_SETTLE_MS);
       const newState = await detectState(page);
-      if (newState === toState) {
+      const successStates = action === 'start' ? ['in_progress'] : ['not_started', 'finished'];
+      if (successStates.includes(newState)) {
         const tookSec = Math.round((Date.now() - startedAt) / 1000);
         await notify(
-          `✅ <b>${escapeHtml(label)}</b>\n🕒 ${escapeHtml(formatARDate())}\n⏱️ Tomó ${tookSec}s`,
+          `✅ <b>${escapeHtml(label)}</b>\n🕒 ${escapeHtml(formatARDate())}\n⏱️ Tomó ${tookSec}s\nEstado final: <code>${escapeHtml(newState)}</code>`,
         );
-        logger.info({ action, tookSec }, 'Acción completada');
+        logger.info({ action, tookSec, newState }, 'Acción completada');
         return { ok: true };
       }
-      throw new Error(`POST_CLICK_STATE_MISMATCH: esperaba ${toState}, obtuve ${newState}`);
+      throw new Error(`POST_FLOW_STATE_MISMATCH: tras ${action} esperaba ${successStates.join('|')}, obtuve ${newState}`);
     } catch (err) {
       logger.error({ err: err.message, attempt, action }, 'Intento falló');
 
@@ -240,8 +360,6 @@ export const attemptAction = async ({ action, fromState, toState, label, force =
 export const startJornada = (opts = {}) =>
   attemptAction({
     action: 'start',
-    fromState: 'not_started',
-    toState: 'in_progress',
     label: 'Iniciar jornada',
     force: !!opts.force,
   });
@@ -249,8 +367,6 @@ export const startJornada = (opts = {}) =>
 export const endJornada = (opts = {}) =>
   attemptAction({
     action: 'end',
-    fromState: 'in_progress',
-    toState: 'finished',
     label: 'Finalizar jornada',
     force: !!opts.force,
   });

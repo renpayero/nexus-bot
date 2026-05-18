@@ -8,13 +8,17 @@ Bot de automatización Node.js + Playwright que inicia y finaliza tu jornada lab
 
 ## Cómo funciona
 
-- A las **07:00 hora Argentina (UTC-3)** clickea **Iniciar Jornada**.
-- A las **15:00 ART** clickea **Finalizar Jornada**.
+- A las **07:00 hora Argentina (UTC-3)** clickea **Iniciar Jornada** y espera que aparezca el botón "Finalizar Jornada" como señal de transición.
+- A las **15:00 ART** clickea **Finalizar Jornada**, espera el modal **"Reporte del día"**, llena la textarea con `END_REPORT_TEXT` (default: "Tareas completadas exitosamente."), espera que el botón "Enviar y Finalizar Jornada" se habilite, lo clickea, y espera que vuelva el botón "Iniciar Jornada" como confirmación.
 - A las **15:10 ART** manda un heartbeat por Telegram.
-- Detecta estado antes de clickear → es **idempotente** (si ya está iniciada/finalizada, no rompe nada).
+- Detecta estado por botón visible (más robusto que por texto, que puede ser carryover entre días):
+  - `endBtn` visible → `in_progress`
+  - `startBtn` visible → `not_started` (puede coexistir con texto "Jornada finalizada" residual)
+  - Solo `finishedText` sin botones → `finished` (estado raro)
+- **Idempotente**: si la jornada ya está en el estado destino (ej. ya iniciada al ejecutar start, ya finalizada al ejecutar end), notifica y no clickea.
 - Reintenta con backoff `30s → 2min → 5min` ante errores transitorios.
 - Si la sesión expiró, re-loguea automáticamente (con tope de 2 intentos).
-- Toma screenshot ante cada fallo y lo manda por Telegram + email.
+- Toma screenshot ante cada fallo y lo manda por Telegram + email. Los errores del modal tienen labels específicos: `MODAL_NOT_OPENED`, `MODAL_TEXTAREA_NOT_FOUND`, `MODAL_SUBMIT_DISABLED`, `END_TRANSITION_TIMEOUT`.
 
 ---
 
@@ -56,6 +60,11 @@ Editar `.env` y reemplazar todos los `__SET_IN_ENV__`:
 
 #### d) DRY_RUN
 - **Siempre arrancar con `DRY_RUN=true`**. El bot no clickea nada de verdad mientras esté activo. Solo cuando pasaste los gates de testing, lo bajás a `false`.
+
+#### e) END_REPORT_TEXT (opcional)
+- Texto que el bot escribe en la textarea del modal "Reporte del día" al finalizar la jornada.
+- Default: `Tareas completadas exitosamente.`
+- Cambialo en `.env` si querés un texto distinto. La textarea acepta hasta 2000 caracteres.
 
 ---
 
@@ -144,6 +153,12 @@ docker compose run --rm nexus-bot npm run login:bootstrap
 
 **`jornada:status` reporta `unknown`**
 - La UI cambió. El log tiene un snippet HTML del bloque "Jornada Laboral". Ajustar `SELECTORS` en `src/jornada.js`.
+
+**Errores en el modal "Reporte del día" al finalizar**
+- `MODAL_NOT_OPENED`: tras click en "Finalizar Jornada" el modal no aparece. La UI cambió. Revisar `SELECTORS.modal.container` en `src/jornada.js`.
+- `MODAL_TEXTAREA_NOT_FOUND`: la textarea no está visible. Tal vez agregaron otro campo. Revisar el selector `textarea` en `performEndFlow`.
+- `MODAL_SUBMIT_DISABLED`: el botón "Enviar y Finalizar Jornada" sigue deshabilitado aunque escribimos texto. Tal vez ahora exige formato distinto o el `END_REPORT_TEXT` está vacío.
+- `END_TRANSITION_TIMEOUT`: el modal se envió pero el botón "Iniciar Jornada" no reapareció. La plataforma puede estar lenta o haber cambiado el flujo post-envío.
 
 **Sesión expira seguido**
 - Correr `npm run login:bootstrap` para regenerar `storageState.json`.

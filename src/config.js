@@ -75,6 +75,7 @@ export const config = {
   tz: process.env.TZ,
   logLevel: process.env.LOG_LEVEL || 'info',
   maxJitterSeconds: parseInt10(process.env.MAX_JITTER_SECONDS, 90),
+  endReportText: process.env.END_REPORT_TEXT || 'Tareas completadas exitosamente.',
   cron: {
     start: process.env.CRON_START,
     end: process.env.CRON_END,
