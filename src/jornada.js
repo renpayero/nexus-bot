@@ -118,7 +118,20 @@ export const detectState = async (page) => {
   }
   logger.debug({ finalUrl, status: response?.status() }, 'Cargué /flow');
 
-  await sleep(1_500);
+  // SPA puede no haber renderizado todavía. Esperar hasta 10s a que aparezca
+  // cualquier elemento accionable del bloque jornada antes de detectar.
+  await page
+    .locator('button:has-text("Iniciar Jornada")')
+    .or(page.locator('button:has-text("Finalizar Jornada")'))
+    .or(page.locator('text=/jornada finalizada/i'))
+    .or(page.locator('text=/trabajando/i'))
+    .first()
+    .waitFor({ state: 'visible', timeout: 10_000 })
+    .catch(() => {
+      logger.debug('Timeout esperando elemento accionable — sigo con detección');
+    });
+
+  await sleep(500);
 
   const endBtn = await firstVisible(page, SELECTORS.endBtn);
   if (endBtn) {
@@ -165,7 +178,7 @@ const isReadyForAction = (action, state) => {
 };
 
 const isRetryableError = (msg) =>
-  /timeout|net::|ERR_|navigation|networkidle|target closed|browser has been closed/i.test(msg);
+  /timeout|net::|ERR_|navigation|networkidle|target closed|browser has been closed|STATE_UNKNOWN/i.test(msg);
 
 const performStartFlow = async (page) => {
   const btn = await firstVisible(page, SELECTORS.startBtn);
@@ -238,6 +251,12 @@ export const attemptAction = async ({ action, label, force = false }) => {
       page = await getPage();
       const state = await detectState(page);
       logger.info({ action, attempt, state }, 'Estado detectado');
+
+      if (state === 'unknown' && !force) {
+        const err = new Error('STATE_UNKNOWN: detección no encontró selectores accionables. Reintentando con backoff.');
+        err.code = 'STATE_UNKNOWN';
+        throw err;
+      }
 
       if (isAlreadyDone(action, state) && !force) {
         const msg = `✅ <b>${escapeHtml(label)}</b>: ya estaba completada (idempotente, estado <code>${escapeHtml(state)}</code>)\n🕒 ${escapeHtml(formatARDate())}`;
