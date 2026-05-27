@@ -4,7 +4,7 @@ import { config, paths } from './config.js';
 import { logger } from './logger.js';
 import { getPage, refreshSession, isAuthLost } from './browser.js';
 import { notify, notifyError } from './notifier.js';
-import { sleep, jitter, formatARDate, escapeHtml } from './utils.js';
+import { sleep, jitter, formatARDate, formatARShort, escapeHtml } from './utils.js';
 
 const RETRY_DELAYS_MS = [30_000, 120_000, 300_000];
 const MAX_SESSION_REFRESHES = 2;
@@ -259,7 +259,11 @@ export const attemptAction = async ({ action, label, force = false }) => {
       }
 
       if (isAlreadyDone(action, state) && !force) {
-        const msg = `✅ <b>${escapeHtml(label)}</b>: ya estaba completada (idempotente, estado <code>${escapeHtml(state)}</code>)\n🕒 ${escapeHtml(formatARDate())}`;
+        const msg =
+          `✅ <b>${escapeHtml(label)}</b>\n\n` +
+          `ℹ️ Ya estaba completada\n` +
+          `🔍 Estado: <code>${escapeHtml(state)}</code>\n` +
+          `🕒 ${escapeHtml(formatARShort())}`;
         logger.info({ action, state }, 'Idempotente');
         await notify(msg);
         return { ok: true, idempotent: true, state };
@@ -268,7 +272,10 @@ export const attemptAction = async ({ action, label, force = false }) => {
       if (!isReadyForAction(action, state) && !force) {
         const shot = await takeScreenshot(page, action, 'unexpected_state');
         await notifyError(
-          `⚠️ <b>${escapeHtml(label)}</b>: estado inesperado <code>${escapeHtml(state)}</code>. No ejecuto acción.\n🕒 ${escapeHtml(formatARDate())}`,
+          `⚠️ <b>${escapeHtml(label)}</b>\n\n` +
+            `🚨 Estado inesperado: <code>${escapeHtml(state)}</code>\n` +
+            `ℹ️ No ejecuto la acción.\n` +
+            `🕒 ${escapeHtml(formatARShort())}`,
           shot,
         );
         return { ok: false, unexpectedState: state };
@@ -284,7 +291,12 @@ export const attemptAction = async ({ action, label, force = false }) => {
         if (action === 'start') {
           logger.info({ action, url: page.url() }, '[DRY_RUN] habría clickeado Iniciar Jornada');
           await notify(
-            `<b>${escapeHtml(label)}</b>: habría clickeado <code>Iniciar Jornada</code> y esperado la transición a in_progress. No se hizo nada.\n🕒 ${escapeHtml(formatARDate())}`,
+            `🧪 <b>${escapeHtml(label)}</b> · DRY_RUN\n\n` +
+              `<b>Habría hecho:</b>\n` +
+              `1️⃣  Click en «Iniciar Jornada»\n` +
+              `2️⃣  Esperar transición a <code>in_progress</code>\n\n` +
+              `ℹ️ No se hizo nada.\n` +
+              `🕒 ${escapeHtml(formatARShort())}`,
           );
         } else {
           const reportText = (config.endReportText && config.endReportText.trim()) || 'Tareas completadas exitosamente.';
@@ -293,7 +305,15 @@ export const attemptAction = async ({ action, label, force = false }) => {
             '[DRY_RUN] habría clickeado Finalizar Jornada, llenado modal y enviado',
           );
           await notify(
-            `<b>${escapeHtml(label)}</b>: habría:\n1️⃣ clickeado <code>Finalizar Jornada</code>\n2️⃣ esperado el modal "Reporte del día"\n3️⃣ llenado textarea con <i>"${escapeHtml(reportText)}"</i>\n4️⃣ clickeado <code>Enviar y Finalizar Jornada</code>\n5️⃣ esperado vuelta a <code>not_started</code>\nNo se hizo nada.\n🕒 ${escapeHtml(formatARDate())}`,
+            `🧪 <b>${escapeHtml(label)}</b> · DRY_RUN\n\n` +
+              `<b>Habría hecho:</b>\n` +
+              `1️⃣  Click en «Finalizar Jornada»\n` +
+              `2️⃣  Esperar modal «Reporte del día»\n` +
+              `3️⃣  Llenar textarea: <i>"${escapeHtml(reportText)}"</i>\n` +
+              `4️⃣  Click «Enviar y Finalizar Jornada»\n` +
+              `5️⃣  Esperar vuelta a <code>not_started</code>\n\n` +
+              `ℹ️ No se hizo nada.\n` +
+              `🕒 ${escapeHtml(formatARShort())}`,
           );
         }
         return { ok: true, dryRun: true };
@@ -311,7 +331,10 @@ export const attemptAction = async ({ action, label, force = false }) => {
       if (successStates.includes(newState)) {
         const tookSec = Math.round((Date.now() - startedAt) / 1000);
         await notify(
-          `✅ <b>${escapeHtml(label)}</b>\n🕒 ${escapeHtml(formatARDate())}\n⏱️ Tomó ${tookSec}s\nEstado final: <code>${escapeHtml(newState)}</code>`,
+          `✅ <b>${escapeHtml(label)}</b>\n\n` +
+            `🔍 Estado final: <code>${escapeHtml(newState)}</code>\n` +
+            `⏱️ Duración: ${tookSec}s\n` +
+            `🕒 ${escapeHtml(formatARShort())}`,
         );
         logger.info({ action, tookSec, newState }, 'Acción completada');
         return { ok: true };
@@ -324,13 +347,19 @@ export const attemptAction = async ({ action, label, force = false }) => {
         if (sessionRefreshes >= MAX_SESSION_REFRESHES) {
           const shot = page ? await takeScreenshot(page, action, 'session_refresh_exhausted') : null;
           await notifyError(
-            `❌ <b>${escapeHtml(label)}</b>: sesión expirada y refresh falló ${MAX_SESSION_REFRESHES} veces. Abortando.`,
+            `❌ <b>${escapeHtml(label)}</b>\n\n` +
+              `🔑 Sesión expirada\n` +
+              `🚨 Refresh falló ${MAX_SESSION_REFRESHES} veces. Abortando.\n` +
+              `🕒 ${escapeHtml(formatARShort())}`,
             shot,
           );
           return { ok: false, sessionRefreshFailed: true };
         }
         sessionRefreshes += 1;
-        await notify(`🔑 Sesión expirada (refresh ${sessionRefreshes}/${MAX_SESSION_REFRESHES}), re-logueando...`);
+        await notify(
+          `🔑 <b>Sesión expirada</b>\n\n` +
+            `🔄 Re-logueando (intento ${sessionRefreshes}/${MAX_SESSION_REFRESHES})...`,
+        );
         try {
           await refreshSession();
           attempt -= 1;
@@ -339,7 +368,10 @@ export const attemptAction = async ({ action, label, force = false }) => {
           logger.error({ err: refreshErr.message }, 'refreshSession falló');
           if (sessionRefreshes >= MAX_SESSION_REFRESHES) {
             await notifyError(
-              `❌ <b>${escapeHtml(label)}</b>: refreshSession falló: <code>${escapeHtml(refreshErr.message)}</code>`,
+              `❌ <b>${escapeHtml(label)}</b>\n\n` +
+                `🔑 refreshSession falló\n` +
+                `💬 <code>${escapeHtml(refreshErr.message)}</code>\n` +
+                `🕒 ${escapeHtml(formatARShort())}`,
             );
             return { ok: false, sessionRefreshFailed: true };
           }
@@ -352,7 +384,10 @@ export const attemptAction = async ({ action, label, force = false }) => {
 
       if (!retryable) {
         await notifyError(
-          `❌ <b>${escapeHtml(label)}</b>: error no recuperable\n<i>${escapeHtml(err.message)}</i>`,
+          `❌ <b>${escapeHtml(label)}</b>\n\n` +
+            `🚨 Error no recuperable\n` +
+            `💬 <i>${escapeHtml(err.message)}</i>\n` +
+            `🕒 ${escapeHtml(formatARShort())}`,
           shot,
         );
         return { ok: false, error: err.message };
@@ -366,7 +401,10 @@ export const attemptAction = async ({ action, label, force = false }) => {
       }
 
       await notifyError(
-        `❌ <b>${escapeHtml(label)}</b> falló tras ${RETRY_DELAYS_MS.length + 1} intentos\n<i>${escapeHtml(err.message)}</i>`,
+        `❌ <b>${escapeHtml(label)}</b>\n\n` +
+          `🚨 Falló tras ${RETRY_DELAYS_MS.length + 1} intentos\n` +
+          `💬 <i>${escapeHtml(err.message)}</i>\n` +
+          `🕒 ${escapeHtml(formatARShort())}`,
         shot,
       );
       return { ok: false, error: err.message, exhausted: true };

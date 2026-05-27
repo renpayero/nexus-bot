@@ -5,9 +5,27 @@ import { logger, purgeOldLogs } from './logger.js';
 import { startJornada, endJornada } from './jornada.js';
 import { closeBrowser } from './browser.js';
 import { notify, sendTelegram } from './notifier.js';
-import { escapeHtml, formatARDate } from './utils.js';
+import { escapeHtml, formatARShort, humanizeCron } from './utils.js';
+import { isPaused, getState } from './state.js';
+import { startListener } from './telegramListener.js';
 
-const describeNext = (expr) => `${expr} (TZ ${config.tz})`;
+const listenerAbort = new AbortController();
+
+const formatPausedUntilAR = (iso) => {
+  try {
+    return `${new Intl.DateTimeFormat('es-AR', {
+      timeZone: 'America/Argentina/Buenos_Aires',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(new Date(iso))} ART`;
+  } catch {
+    return iso;
+  }
+};
 
 const main = async () => {
   logger.info(
@@ -26,17 +44,29 @@ const main = async () => {
   if (!fs.existsSync(paths.storageState)) {
     logger.warn('No hay storageState — corré `npm run login:bootstrap` antes del próximo cron');
     await sendTelegram(
-      `⚠️ <b>Nexus Bot</b>: no hay sesión guardada en <code>${escapeHtml(paths.storageState)}</code>.\nEjecutá <code>npm run login:bootstrap</code> antes del próximo cron.`,
+      `⚠️ <b>Sesión no encontrada</b>\n\n` +
+        `🔑 No hay sesión guardada en disco.\n` +
+        `📂 <code>${escapeHtml(paths.storageState)}</code>\n\n` +
+        `▶️ Ejecutá <code>npm run login:bootstrap</code> antes del próximo cron.`,
     );
   }
 
+  const bootState = getState();
+  const modoLine = config.dryRun ? '🧪 Modo: <b>DRY_RUN</b> (no clickea)' : '⚙️ Modo: <b>producción</b>';
+  const pausedLine = bootState.isPaused
+    ? `\n⏸️ Estado: <b>pausado</b>${
+        bootState.pausedUntil ? ` hasta ${escapeHtml(formatPausedUntilAR(bootState.pausedUntil))}` : ' (manual)'
+      }`
+    : '';
+
   const startupMsg =
-    `🤖 <b>Nexus Bot iniciado</b>\n` +
-    `🕒 ${escapeHtml(formatARDate())}\n` +
-    `DRY_RUN=<code>${config.dryRun}</code>\n` +
-    `Próximo inicio: <code>${escapeHtml(describeNext(config.cron.start))}</code>\n` +
-    `Próximo fin: <code>${escapeHtml(describeNext(config.cron.end))}</code>\n` +
-    `Heartbeat: <code>${escapeHtml(describeNext(config.cron.heartbeat))}</code>`;
+    `🤖 <b>Nexus Bot iniciado</b>\n\n` +
+    `🕒 ${escapeHtml(formatARShort())}\n` +
+    `${modoLine}${pausedLine}\n\n` +
+    `<b>Horarios programados</b>\n` +
+    `🌅 Inicio · <code>${escapeHtml(humanizeCron(config.cron.start))}</code>\n` +
+    `🌇 Fin · <code>${escapeHtml(humanizeCron(config.cron.end))}</code>\n` +
+    `💚 Heartbeat · <code>${escapeHtml(humanizeCron(config.cron.heartbeat))}</code>`;
   await notify(startupMsg);
 
   const cronOpts = { timezone: config.tz };
@@ -44,6 +74,10 @@ const main = async () => {
   cron.schedule(
     config.cron.start,
     () => {
+      if (isPaused()) {
+        logger.info('Cron CRON_START skipped: bot pausado');
+        return;
+      }
       logger.info('Cron CRON_START disparó');
       startJornada().catch((err) => logger.error({ err: err.message }, 'startJornada lanzó'));
     },
@@ -53,6 +87,10 @@ const main = async () => {
   cron.schedule(
     config.cron.end,
     () => {
+      if (isPaused()) {
+        logger.info('Cron CRON_END skipped: bot pausado');
+        return;
+      }
       logger.info('Cron CRON_END disparó');
       endJornada().catch((err) => logger.error({ err: err.message }, 'endJornada lanzó'));
     },
@@ -63,17 +101,29 @@ const main = async () => {
     config.cron.heartbeat,
     async () => {
       logger.info('Cron CRON_HEARTBEAT disparó');
-      const stamp = formatARDate();
-      await sendTelegram(`💚 Heartbeat OK — ${escapeHtml(stamp)}`);
+      const pausedLine = isPaused() ? '\n⏸️ Estado: pausado' : '';
+      await sendTelegram(
+        `💚 <b>Heartbeat OK</b>\n\n` +
+          `🕒 ${escapeHtml(formatARShort())}${pausedLine}`,
+      );
     },
     cronOpts,
   );
 
-  logger.info('Cron jobs registrados, proceso vivo');
+  startListener({ signal: listenerAbort.signal }).catch((err) => {
+    logger.error({ err: err.message }, 'Listener Telegram terminó con error');
+  });
+
+  logger.info('Cron jobs registrados + listener Telegram arrancado, proceso vivo');
 };
 
 const shutdown = async (signal) => {
   logger.info({ signal }, 'Recibí señal, cerrando');
+  try {
+    listenerAbort.abort();
+  } catch (err) {
+    logger.warn({ err: err.message }, 'Error al abortar listener en shutdown');
+  }
   try {
     await closeBrowser();
   } catch (err) {

@@ -49,6 +49,7 @@ export const paths = {
   storageState: path.join(ROOT, 'data', 'session', 'storageState.json'),
   logs: path.join(ROOT, 'data', 'logs'),
   screenshots: path.join(ROOT, 'data', 'screenshots'),
+  state: path.join(ROOT, 'data', 'state.json'),
 };
 
 export const config = {

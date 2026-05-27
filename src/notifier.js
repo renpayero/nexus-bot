@@ -69,9 +69,7 @@ export const sendEmail = async (subject, htmlBody, attachments = []) => {
 };
 
 export const notify = async (text) => {
-  const prefix = config.dryRun ? '🧪 [DRY_RUN] ' : '';
-  const final = `${prefix}${text}`;
-  const result = await sendTelegram(final);
+  const result = await sendTelegram(text);
   if (!result.ok) logger.warn({ error: result.error }, 'Telegram notify falló — sigo igual');
   return result;
 };

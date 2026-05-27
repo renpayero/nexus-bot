@@ -83,6 +83,27 @@ Editar `.env` y reemplazar todos los `__SET_IN_ENV__`:
 
 ---
 
+## Comandos por Telegram
+
+El bot escucha comandos enviados desde el chat configurado en `TELEGRAM_CHAT_ID`. Cualquier otro chat es ignorado silenciosamente (queda log de auditoría).
+
+| Comando | Qué hace |
+|---|---|
+| `/pause` | Antes de pausar, **chequea el estado en Nexus**. Si hay una jornada `in_progress`, **bloquea** y pide ejecutar `/end-now` primero (evita que la jornada quede abierta toda la noche). Si el estado es `not_started` o `finished`, pausa. El heartbeat sigue llegando con sufijo `(⏸️ pausado)`. **Sobrevive `docker compose restart/down/up`** (`data/state.json`). |
+| `/pause <N>` | Pausa por N días con auto-reanudación. Ej: `/pause 1` para un feriado de un día. Misma lógica de chequeo de estado antes de pausar. |
+| `/pause force [N]` | Saltea el chequeo de estado y pausa igual. Útil si ya finalizaste manualmente en la web, o si los selectores están rotos y querés pausar igual. |
+| `/end-now` | Dispara el flujo de finalización (clickea "Finalizar Jornada", llena el modal, envía). Respeta `DRY_RUN` e idempotencia. Útil cuando te enterás de un feriado a mitad de día. |
+| `/resume` | Reanuda. Idempotente: si ya estaba activo responde "ya estaba activo". |
+| `/status` | Reporta estado (activo / pausado + hasta cuándo), próximos crons, `DRY_RUN`. |
+| `/help` | Lista de comandos. `/start` es alias. |
+
+### Caveats
+
+- Si corrés `npm start` local **mientras** el container está activo, Telegram devuelve **409 Conflict** a una de las dos instancias (solo una puede consumir `getUpdates`). El bot loguea el conflict y reintenta con backoff de 60s. Para evitarlo: parar el container o el proceso local antes de probar.
+- Al reiniciar el contenedor, los comandos pendientes en la cola de Telegram se **descartan** (drain inicial con `offset=-1`). Si mandaste `/pause` justo antes del restart y no llegó respuesta, re-mandalo después del boot.
+
+---
+
 ## Plan de testing (en orden)
 
 Con `DRY_RUN=true`:
