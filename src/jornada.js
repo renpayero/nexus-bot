@@ -1,10 +1,10 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { config, paths } from './config.js';
+import { config } from './config.js';
 import { logger } from './logger.js';
 import { getPage, refreshSession, isAuthLost } from './browser.js';
 import { notify, notifyError } from './notifier.js';
-import { sleep, jitter, formatARDate, formatARShort, escapeHtml } from './utils.js';
+import { sleep, jitter, formatARShort, escapeHtml } from './utils.js';
+import { firstVisible, waitForVisible, takeScreenshot } from './playwright-helpers.js';
+import { checkAndCompleteSurvey } from './encuesta.js';
 
 const RETRY_DELAYS_MS = [30_000, 120_000, 300_000];
 const MAX_SESSION_REFRESHES = 2;
@@ -62,50 +62,6 @@ const SELECTORS = {
       ],
     },
   },
-};
-
-const firstVisible = async (page, group) => {
-  for (const builder of group.roles ?? []) {
-    const loc = builder(page).first();
-    try {
-      if (await loc.isVisible({ timeout: 1_500 })) return { locator: loc, kind: 'role' };
-    } catch {
-      // ignore
-    }
-  }
-  for (const sel of group.css ?? []) {
-    const loc = page.locator(sel).first();
-    try {
-      if (await loc.isVisible({ timeout: 1_500 })) return { locator: loc, kind: 'css', selector: sel };
-    } catch {
-      // ignore
-    }
-  }
-  return null;
-};
-
-const waitForVisible = async (page, group, timeoutMs, label) => {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const found = await firstVisible(page, group);
-    if (found) return found;
-    await sleep(500);
-  }
-  throw new Error(`${label}: no visible tras ${timeoutMs}ms`);
-};
-
-const takeScreenshot = async (page, action, reason) => {
-  try {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const file = path.join(paths.screenshots, `${stamp}_${action}_${reason}.png`);
-    const buf = await page.screenshot({ fullPage: true });
-    fs.writeFileSync(file, buf);
-    logger.info({ file }, 'Screenshot guardado');
-    return buf;
-  } catch (err) {
-    logger.warn({ err: err.message }, 'No se pudo tomar screenshot');
-    return null;
-  }
 };
 
 export const detectState = async (page) => {
@@ -181,6 +137,11 @@ const isRetryableError = (msg) =>
   /timeout|net::|ERR_|navigation|networkidle|target closed|browser has been closed|STATE_UNKNOWN/i.test(msg);
 
 const performStartFlow = async (page) => {
+  const surveyResult = await checkAndCompleteSurvey(page);
+  if (surveyResult.handled) {
+    logger.info({ surveyUrl: surveyResult.surveyUrl }, 'Encuesta resuelta, continúo con iniciar jornada');
+  }
+
   const btn = await firstVisible(page, SELECTORS.startBtn);
   if (!btn) throw new Error('START_BTN_NOT_FOUND: botón "Iniciar Jornada" no visible antes del click');
   logger.info({ kind: btn.kind, selector: btn.selector }, 'Clickeando Iniciar Jornada');
